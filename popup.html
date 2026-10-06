@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Volume Booster</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="app">
+    <header class="top">
+      <div>
+        <h1>Volume Booster</h1>
+        <p>Clean audio amplification</p>
+      </div>
+      <button id="power" class="power on" aria-label="Toggle booster">ON</button>
+    </header>
+
+    <section class="site-row">
+      <div class="site-info">
+        <span class="site-label">Settings for</span>
+        <strong id="site-name">All sites</strong>
+      </div>
+      <div class="scope" role="group" aria-label="Settings scope">
+        <button id="scope-site" class="scope-btn active" disabled>This site</button>
+        <button id="scope-global" class="scope-btn">All sites</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <span>Boost</span>
+        <strong id="value">100%</strong>
+      </div>
+
+      <input
+        id="slider"
+        type="range"
+        min="0"
+        max="500"
+        value="100"
+        step="5"
+        aria-label="Audio boost"
+      >
+
+      <div class="scale">
+        <span>0%</span>
+        <span>100%</span>
+        <span>300%</span>
+        <span>500%</span>
+      </div>
+    </section>
+
+    <section class="presets">
+      <button data-value="100">Normal</button>
+      <button data-value="150">150%</button>
+      <button data-value="200">200%</button>
+      <button data-value="300">300%</button>
+      <button data-value="500">500%</button>
+    </section>
+
+    <button id="reset" class="reset">Reset to 100%</button>
+
+    <footer>
+      <span id="status">Ready</span>
+      <span>Alt+Shift+↑ / ↓</span>
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

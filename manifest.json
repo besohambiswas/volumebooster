@@ -1,0 +1,60 @@
+{
+  "manifest_version": 3,
+  "name": "Clean Volume Booster",
+  "version": "1.1.0",
+  "description": "Safely boosts audio on the current webpage without modifying page content.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Volume Booster",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "increase-boost": {
+      "suggested_key": {
+        "default": "Alt+Shift+Up"
+      },
+      "description": "Increase audio boost"
+    },
+    "decrease-boost": {
+      "suggested_key": {
+        "default": "Alt+Shift+Down"
+      },
+      "description": "Decrease audio boost"
+    },
+    "toggle-mute": {
+      "suggested_key": {
+        "default": "Alt+Shift+M"
+      },
+      "description": "Turn the volume booster on or off"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}
