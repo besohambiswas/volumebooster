@@ -132,6 +132,8 @@
       gain.disconnect();
     } catch (_) {}
 
+    state.mediaNodes.delete(media);
+    state.gainNodes.delete(media);
     state.routedMedia.delete(media);
   }
 
