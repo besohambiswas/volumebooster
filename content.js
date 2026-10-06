@@ -5,19 +5,17 @@
   const EPSILON = 0.001;
   const round1 = (value) => Math.round(value * 10) / 10;
 
-  // Everything stays isolated from the page's JS and DOM.
   const state = {
     audioContext: null,
     mediaNodes: new WeakMap(),
     gainNodes: new WeakMap(),
     protectedMedia: new WeakSet(),
+    routedMedia: new Set(),
     mediaObserver: null,
     origin: "",
-    // Raw stored settings (global defaults + per-site overrides):
     globalBoost: 1,
     globalEnabled: true,
     siteSettings: {},
-    // Effective values for this page, derived from the above:
     boost: 1,
     enabled: true,
     initialized: false,
@@ -35,8 +33,6 @@
     }
   }
 
-  // Per-site memory only makes sense for normal web pages; on file://,
-  // about:blank, etc. the global settings apply.
   function pageOrigin() {
     try {
       const origin = location.origin;
@@ -46,10 +42,6 @@
     }
   }
 
-  // Rerouting a page's audio through Web Audio is invasive, so it only
-  // happens when amplification is actually requested. A neutral 100%
-  // boost (or booster switched off) leaves media elements completely
-  // untouched, so site audio pipelines keep working exactly as before.
   function needsRouting() {
     return state.enabled && Math.abs(state.boost - 1) > EPSILON;
   }
@@ -63,36 +55,12 @@
         hasOverride: true
       };
     }
+
     return {
       boost: clamp(state.globalBoost, 0, MAX_BOOST),
       enabled: Boolean(state.globalEnabled),
       hasOverride: false
     };
-  }
-
-  function applyEffective() {
-    const effective = effectiveSettings();
-    state.boost = effective.boost;
-    state.enabled = effective.enabled;
-    updateAll();
-  }
-
-  async function loadSettings() {
-    if (!extensionAlive()) return;
-    try {
-      const data = await chrome.storage.local.get({
-        globalBoost: 1,
-        enabled: true,
-        siteSettings: {}
-      });
-      state.globalBoost = clamp(data.globalBoost, 0, MAX_BOOST);
-      state.globalEnabled = Boolean(data.enabled);
-      state.siteSettings =
-        data.siteSettings && typeof data.siteSettings === "object"
-          ? data.siteSettings
-          : {};
-      applyEffective();
-    } catch (_) {}
   }
 
   function getContext() {
@@ -103,11 +71,13 @@
       if (!Ctx) return null;
 
       const ctx = new Ctx();
-      // Once audio output becomes available, retry anything that was
-      // waiting for a running context.
+
       ctx.onstatechange = () => {
-        if (ctx.state === "running" && needsRouting()) updateAll();
+        if (ctx.state === "running" && needsRouting()) {
+          updateAll();
+        }
       };
+
       state.audioContext = ctx;
       return ctx;
     } catch (_) {
@@ -120,15 +90,15 @@
     if (!ctx) return false;
 
     try {
-      if (ctx.state === "suspended") await ctx.resume();
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
       return ctx.state === "running";
     } catch (_) {
       return false;
     }
   }
 
-  // Retrying on the first user gesture lets the browser's autoplay policy
-  // allow the AudioContext, without ever mutating the page.
   function armActivationHooks() {
     if (state.activationArmed) return;
     state.activationArmed = true;
@@ -137,8 +107,11 @@
       window.removeEventListener("pointerdown", onGesture, true);
       window.removeEventListener("keydown", onGesture, true);
       state.activationArmed = false;
+
       resumeContext().then(() => {
-        if (needsRouting()) updateAll();
+        if (needsRouting()) {
+          updateAll();
+        }
       });
     };
 
@@ -146,27 +119,52 @@
     window.addEventListener("keydown", onGesture, true);
   }
 
+  function disconnectMedia(media) {
+    const source = state.mediaNodes.get(media);
+    const gain = state.gainNodes.get(media);
+    if (!source || !gain) return;
+
+    try {
+      source.disconnect();
+    } catch (_) {}
+
+    try {
+      gain.disconnect();
+    } catch (_) {}
+
+    state.routedMedia.delete(media);
+  }
+
+  function shouldSkipMedia(media) {
+    if (!(media instanceof HTMLMediaElement)) return true;
+    if (state.protectedMedia.has(media)) return true;
+    if (media.mediaKeys) return true;
+    return false;
+  }
+
   function connectMedia(media) {
     if (!(media instanceof HTMLMediaElement)) return;
-    if (state.mediaNodes.has(media)) return;
     if (!needsRouting()) return;
+    if (shouldSkipMedia(media)) return;
+    if (state.mediaNodes.has(media)) {
+      updateGain(media);
+      return;
+    }
 
-    // Never reroute DRM/protected audio: Web Audio would output silence.
-    if (state.protectedMedia.has(media) || media.mediaKeys) return;
-
-    // Do not interfere with media that is not usable yet.
     if (media.readyState === HTMLMediaElement.HAVE_NOTHING) {
-      media.addEventListener("loadedmetadata", () => connectMedia(media), {
-        once: true
-      });
+      media.addEventListener(
+        "loadedmetadata",
+        () => {
+          connectMedia(media);
+        },
+        { once: true }
+      );
       return;
     }
 
     const ctx = getContext();
     if (!ctx) return;
 
-    // Connecting into a suspended context would mute the element entirely.
-    // Wait for a user gesture or the next play event instead.
     if (ctx.state !== "running") {
       armActivationHooks();
       resumeContext();
@@ -182,11 +180,12 @@
 
       state.mediaNodes.set(media, source);
       state.gainNodes.set(media, gain);
+      state.routedMedia.add(media);
 
       updateGain(media);
     } catch (_) {
-      // createMediaElementSource can fail for protected or unsupported media.
-      // Fail silently so the website continues normally.
+      // A media element can already be controlled by page code or may be
+      // protected. Leave it untouched rather than risking silence.
     }
   }
 
@@ -195,18 +194,26 @@
     if (!gain) return;
 
     try {
-      // Switched off means bypass (neutral volume), never mute.
-      const target = state.enabled ? clamp(state.boost, 0, MAX_BOOST) : 1;
+      const target = needsRouting() ? clamp(state.boost, 0, MAX_BOOST) : 1;
       const now = gain.context.currentTime;
 
-      // Tiny ramp prevents abrupt clicks/pops when changing boost.
       gain.gain.cancelScheduledValues(now);
       gain.gain.setTargetAtTime(target, now, 0.015);
     } catch (_) {}
   }
 
   function updateAll() {
-    for (const media of document.querySelectorAll("audio, video")) {
+    const mediaList = document.querySelectorAll("audio, video");
+
+    if (!needsRouting()) {
+      for (const media of state.routedMedia) {
+        updateGain(media);
+        disconnectMedia(media);
+      }
+      return;
+    }
+
+    for (const media of mediaList) {
       connectMedia(media);
       updateGain(media);
     }
@@ -236,45 +243,73 @@
   }
 
   function setupMediaEvents() {
-    // DRM streams announce themselves here; mark them as untouchable
-    // before any connection can happen.
-    document.addEventListener("encrypted", (event) => {
-      const media = event.target;
-      if (media instanceof HTMLMediaElement) {
-        state.protectedMedia.add(media);
-      }
-    }, true);
+    document.addEventListener(
+      "encrypted",
+      (event) => {
+        const media = event.target;
+        if (media instanceof HTMLMediaElement) {
+          state.protectedMedia.add(media);
+          disconnectMedia(media);
+        }
+      },
+      true
+    );
 
-    document.addEventListener("play", async (event) => {
-      const media = event.target;
-      if (!(media instanceof HTMLMediaElement)) return;
+    document.addEventListener(
+      "play",
+      async (event) => {
+        const media = event.target;
+        if (!(media instanceof HTMLMediaElement)) return;
 
-      await resumeContext();
-      connectMedia(media);
-      updateGain(media);
-    }, true);
+        await resumeContext();
+        connectMedia(media);
+        updateGain(media);
+      },
+      true
+    );
 
-    document.addEventListener("volumechange", (event) => {
-      const media = event.target;
-      if (media instanceof HTMLMediaElement) updateGain(media);
-    }, true);
+    document.addEventListener(
+      "volumechange",
+      (event) => {
+        const media = event.target;
+        if (media instanceof HTMLMediaElement) {
+          updateGain(media);
+        }
+      },
+      true
+    );
+
+    document.addEventListener(
+      "emptied",
+      (event) => {
+        const media = event.target;
+        if (media instanceof HTMLMediaElement) {
+          disconnectMedia(media);
+        }
+      },
+      true
+    );
   }
 
   async function persist(patch) {
     if (!extensionAlive()) return;
+
     try {
       await chrome.storage.local.set(patch);
     } catch (_) {}
   }
 
   async function saveSiteSetting(patch) {
-    if (!state.origin || Object.keys(patch).length === 0) return false;
+    if (!state.origin || Object.keys(patch).length === 0) {
+      return false;
+    }
 
     const current =
       state.siteSettings[state.origin] &&
       typeof state.siteSettings[state.origin] === "object"
         ? state.siteSettings[state.origin]
         : {};
+
     state.siteSettings[state.origin] = { ...current, ...patch };
 
     await persist({ siteSettings: state.siteSettings });
@@ -284,23 +319,42 @@
 
   async function clearSiteSetting() {
     if (!state.origin) return false;
+
     if (state.siteSettings[state.origin]) {
       delete state.siteSettings[state.origin];
       await persist({ siteSettings: state.siteSettings });
     }
+
     applyEffective();
     return true;
   }
 
   async function saveGlobalSetting(patch) {
-    if ("boost" in patch) state.globalBoost = clamp(patch.boost, 0, MAX_BOOST);
-    if ("enabled" in patch) state.globalEnabled = Boolean(patch.enabled);
+    if ("boost" in patch) {
+      state.globalBoost = clamp(patch.boost, 0, MAX_BOOST);
+    }
+
+    if ("enabled" in patch) {
+      state.globalEnabled = Boolean(patch.enabled);
+    }
 
     await persist({
       globalBoost: state.globalBoost,
       enabled: state.globalEnabled
     });
+
     applyEffective();
+  }
+
+  function applyEffective() {
+    const effective = effectiveSettings();
+    state.boost = effective.boost;
+    state.enabled = effective.enabled;
+    updateAll();
+
+    if (needsRouting()) {
+      resumeContext();
+    }
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -310,31 +364,38 @@
       try {
         if (message?.type === "get-state") {
           const effective = effectiveSettings();
+
           sendResponse({
             ok: true,
             boost: effective.boost,
             enabled: effective.enabled,
             hasSiteOverride: effective.hasOverride,
             origin: state.origin,
-            supported: Boolean(window.AudioContext || window.webkitAudioContext)
+            supported: Boolean(
+              window.AudioContext || window.webkitAudioContext
+            )
           });
           return;
         }
 
         if (message?.type === "set-state") {
-          // Site-scoped save from the popup ("This site" scope).
           const patch = {};
+
           if ("boost" in message) {
             patch.boost = clamp(message.boost, 0, MAX_BOOST);
           }
+
           if ("enabled" in message) {
             patch.enabled = Boolean(message.enabled);
           }
 
           const saved = await saveSiteSetting(patch);
-          if (!saved) await saveGlobalSetting(patch);
+          if (!saved) {
+            await saveGlobalSetting(patch);
+          }
 
           await resumeContext();
+
           sendResponse({
             ok: true,
             boost: state.boost,
@@ -349,7 +410,9 @@
             boost: message.boost,
             enabled: message.enabled
           });
+
           await resumeContext();
+
           sendResponse({
             ok: true,
             boost: state.boost,
@@ -359,17 +422,19 @@
         }
 
         if (message?.type === "nudge") {
-          // Keyboard shortcuts: adjust this site's boost (or the global
-          // default on pages without a site origin).
           const delta = clamp(message.delta, -MAX_BOOST, MAX_BOOST);
           const next = clamp(round1(state.boost + delta), 0, MAX_BOOST);
 
           const saved = state.origin
             ? await saveSiteSetting({ boost: next })
             : false;
-          if (!saved) await saveGlobalSetting({ boost: next });
+
+          if (!saved) {
+            await saveGlobalSetting({ boost: next });
+          }
 
           await resumeContext();
+
           sendResponse({
             ok: true,
             boost: state.boost,
@@ -384,9 +449,13 @@
           const saved = state.origin
             ? await saveSiteSetting({ enabled: next })
             : false;
-          if (!saved) await saveGlobalSetting({ enabled: next });
+
+          if (!saved) {
+            await saveGlobalSetting({ enabled: next });
+          }
 
           await resumeContext();
+
           sendResponse({
             ok: true,
             boost: state.boost,
@@ -398,6 +467,7 @@
         if (message?.type === "reset-site") {
           await clearSiteSetting();
           await resumeContext();
+
           sendResponse({
             ok: true,
             boost: state.boost,
@@ -423,17 +493,18 @@
     return true;
   });
 
-  // Keep in sync even if a direct message is missed (e.g. during races
-  // between the popup, the keyboard shortcuts, and this tab).
   if (extensionAlive()) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
+
       if (changes.globalBoost) {
         state.globalBoost = clamp(changes.globalBoost.newValue, 0, MAX_BOOST);
       }
+
       if (changes.enabled) {
         state.globalEnabled = Boolean(changes.enabled.newValue);
       }
+
       if (changes.siteSettings) {
         state.siteSettings =
           changes.siteSettings.newValue &&
@@ -441,6 +512,7 @@
             ? changes.siteSettings.newValue
             : {};
       }
+
       applyEffective();
     });
   }
@@ -454,6 +526,11 @@
     setupObserver();
     setupMediaEvents();
     updateAll();
+
+    if (needsRouting()) {
+      await resumeContext();
+      updateAll();
+    }
   }
 
   init();
